@@ -82,7 +82,7 @@ if __name__ == "__main__":
         try:
             main_gui = ui.mainGui(options)
 
-            main_gui.handleevent()
+            main_gui.uieventloop()
 
         except dnfdaemon.client.DaemonError as e:
             logger.error("dnfdaemon client error: %s ", e)

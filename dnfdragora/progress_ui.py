@@ -49,11 +49,12 @@ class TransactionProgress(dnf.callback.TransactionProgress):
 
 class ProgressBar:
 
-    def __init__(self, main_dialog, layout):
+    def __init__(self, main_dialog, layout, queueEvent):
         self.factory = yui.YUI.widgetFactory()
 
         self.main_dialog = main_dialog
         self.layout = layout
+        self.queueEvent = queueEvent
         vbox = self.factory.createVBox(layout)
         self.info_widget = self.factory.createLabel(vbox, "")
         self.info_widget.setStretchable( yui.YD_HORIZ, True )
@@ -61,15 +62,36 @@ class ProgressBar:
         self.info_sub_widget = self.factory.createLabel(vbox, "")
         self.info_sub_widget.setStretchable( yui.YD_HORIZ, True )
 
-    def info(self, text) :
+    def info(self, text):
+        self.queueEvent('function', self._info, text)
+
+    def _info(self, text) :
+        if text:
+            self.queueEvent('input lock')
+        else:
+            self.queueEvent('input unlock')
         self.info_widget.setValue(text)
         #self.__flush()
 
-    def info_sub(self, text) :
+    def info_sub(self, text):
+        self.queueEvent('function', self._info_sub, text)
+
+    def _info_sub(self, text) :
+        if text:
+            self.queueEvent('input lock')
+        else:
+            self.queueEvent('input unlock')
         self.info_sub_widget.setValue(text)
         #self.__flush()
 
-    def set_progress(self, frac, label=None) :
+    def set_progress(self, frac, label=None):
+        self.queueEvent('function', self._set_progress, frac, label)
+
+    def _set_progress(self, frac, label=None) :
+        if frac:
+            self.queueEvent('input lock')
+        else:
+            self.queueEvent('input unlock')
         if label is not None:
             self.progressbar.setLabel(label)
         val = self.progressbar.value()
@@ -78,7 +100,11 @@ class ProgressBar:
             self.progressbar.setValue(newval)
         #self.__flush()
 
-    def reset_all(self) :
+    def reset_all(self):
+        self.queueEvent('function', self._reset_all)
+
+    def _reset_all(self) :
+        self.queueEvent('input unlock')
         self.info_widget.setValue('')
         self.info_sub_widget.setValue('')
         self.set_progress(0, "")

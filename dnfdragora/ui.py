@@ -13,7 +13,10 @@ Author:  Angelo Naselli <anaselli@linux.it>
 
 import os
 import sys
+import time
+import queue
 import platform
+import threading
 import re
 import yui
 import webbrowser
@@ -194,38 +197,15 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
 
         dnfdragora.basedragora.BaseDragora.__init__(self, self.use_comps)
 
-        # setup UI
-        self._setupUI()
+        # setup backend thread
+        self.ui_is_ready = threading.Event()
+        self.backend_is_ready = threading.Event()
+        self.backend_thread = threading.Thread(target=self.backendeventloop, name="backend")
+        self.backend_thread.start()
+        self.backend_is_ready.wait()
 
         if 'install' in self.options.keys() :
-            pkgs = " ".join(self.options['install'])
-            self.backend.Install(pkgs)
-            #TODO evaluate if passing always_yes to False in this case
-            always_yes = self.always_yes
-            self._run_transaction(always_yes)
-
-        rpm_groups = None
-        if self.use_comps :
-            # let's show the dialog with a poll event
-            self.dialog.pollEvent()
-            rpm_groups = self.backend.GetGroups()
-
-        self.gIcons = compsicons.CompsIcons(rpm_groups, self.group_icon_path) if self.use_comps else  groupicons.GroupIcons(self.group_icon_path)
-
-        self.dialog.pollEvent()
-        self._fillGroupTree()
-        sel = self.tree.selectedItem()
-        group = None
-        if sel :
-            group = self._groupNameFromItem(self.groupList, sel)
-
-        filter = self._filterNameSelected()
-        self.checkAllButton.setEnabled(filter == 'to_update')
-        self._fillPackageList(group, filter)
-        sel_pkg = self._selectedPackage()
-        if sel_pkg :
-            self._setInfoOnWidget(sel_pkg)
-
+            self.backendQueueEvent('install option')
 
     def _configFileRead(self) :
         '''
@@ -462,7 +442,7 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
         self.info.setWeight(yui.YD_HORIZ,40)
         self.info.setWeight(yui.YD_VERT, 40)
 
-        self.infobar = progress_ui.ProgressBar(self.dialog, pbar_layout)
+        self.infobar = progress_ui.ProgressBar(self.dialog, pbar_layout, self.uiQueueEvent)
 
         self.applyButton = self.factory.createIconButton(hbox_footbar,"",_("&Apply"))
         self.applyButton.setWeight(0,3)
@@ -575,24 +555,15 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
 
         return selected_pkg
 
-    def _fillPackageList(self, groupName=None, filter="all") :
+    def _getFillPackageListPkg(self, groupName=None, filter="all"):
         '''
-        fill package list filtered by group if groupName is given,
+        get package list filtered by group if groupName is given,
         and checks installed packages.
         Special value for groupName 'All' means all packages
         Available filters are:
         all, installed, not_installed, to_update and skip_other
         '''
-        sel_pkg = self._selectedPackage()
-        # reset info view
-        self.info.setValue("")
-
-        yui.YUI.app().busyCursor()
-
-        self.itemList = {}
-        # {
-        #   name-epoch_version-release.arch : { pkg: dnf-pkg, item: YItem}
-        # }
+        pkgs = []
         if filter == 'all' or filter == 'to_update' or filter == 'skip_other':
             updates = self.backend.get_packages('updates')
             for pkg in updates :
@@ -605,19 +576,7 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 if insert_items :
                     skip_insert = (filter == 'skip_other' and not (pkg.arch == 'noarch' or pkg.arch == platform.machine()))
                     if not skip_insert :
-                        item = yui.YCBTableItem(pkg.name , pkg.summary , pkg.version, pkg.release, pkg.arch, pkg.sizeM)
-                        pkg_name = pkg.fullname
-                        if sel_pkg :
-                            if sel_pkg.fullname == pkg_name :
-                                item.setSelected(True)
-                        item.check(self.packageQueue.checked(pkg))
-                        self.itemList[pkg_name] = {
-                            'pkg' : pkg, 'item' : item
-                            }
-                        if not self.update_only:
-                            item.addCell(" ")
-                            self._setStatusToItem(pkg,item)
-                        item.this.own(False)
+                        pkgs.append(pkg)
 
         if filter == 'all' or filter == 'installed' or filter == 'skip_other':
             installed = self.backend.get_packages('installed')
@@ -631,19 +590,7 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 if insert_items :
                     skip_insert = (filter == 'skip_other' and not (pkg.arch == 'noarch' or pkg.arch == platform.machine()))
                     if not skip_insert :
-                        item = yui.YCBTableItem(pkg.name , pkg.summary , pkg.version, pkg.release, pkg.arch, pkg.sizeM)
-                        pkg_name = pkg.fullname
-                        if sel_pkg :
-                            if sel_pkg.fullname == pkg_name :
-                                item.setSelected(True)
-                        item.check(self.packageQueue.checked(pkg))
-                        self.itemList[pkg_name] = {
-                            'pkg' : pkg, 'item' : item
-                            }
-                        if not self.update_only:
-                            item.addCell(" ")
-                            self._setStatusToItem(pkg,item)
-                        item.this.own(False)
+                        pkgs.append(pkg)
 
         if filter == 'all' or filter == 'not_installed' or filter == 'skip_other':
             available = self.backend.get_packages('available')
@@ -657,19 +604,44 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 if insert_items :
                     skip_insert = (filter == 'skip_other' and not (pkg.arch == 'noarch' or pkg.arch == platform.machine()))
                     if not skip_insert :
-                        item = yui.YCBTableItem(pkg.name , pkg.summary , pkg.version, pkg.release, pkg.arch, pkg.sizeM)
-                        pkg_name = pkg.fullname
-                        if sel_pkg :
-                            if sel_pkg.fullname == pkg_name :
-                                item.setSelected(True)
-                        item.check(self.packageQueue.checked(pkg))
-                        self.itemList[pkg_name] = {
-                            'pkg' : pkg, 'item' : item
-                            }
-                        if not self.update_only:
-                            item.addCell(" ")
-                            self._setStatusToItem(pkg,item)
-                        item.this.own(False)
+                        pkgs.append(pkg)
+
+        return pkgs
+
+    def _fillPackageList(self, pkgs, createTreeItem=False):
+        '''
+        fill package list using provided pkgs,
+        '''
+        sel_pkg = self._selectedPackage()
+        # reset info view
+        self.info.setValue("")
+
+        yui.YUI.app().busyCursor()
+
+        #clean up tree
+        if createTreeItem:
+            self._fillGroupTree()
+
+        self.itemList = {}
+        # {
+        #   name-epoch_version-release.arch : { pkg: dnf-pkg, item: YItem}
+        # }
+
+        for pkg in pkgs:
+            item = yui.YCBTableItem(pkg.name , pkg.summary , pkg.version, pkg.release, pkg.arch, pkg.sizeM)
+            pkg_name = pkg.fullname
+            if sel_pkg :
+                if sel_pkg.fullname == pkg_name :
+                    item.setSelected(True)
+            item.check(self.packageQueue.checked(pkg))
+            self.itemList[pkg_name] = {
+                'pkg' : pkg, 'item' : item
+                }
+            if not self.update_only:
+                item.addCell(" ")
+                self._setStatusToItem(pkg,item)
+            item.this.own(False)
+
 
         keylist = sorted(self.itemList.keys())
         v = []
@@ -686,6 +658,16 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
         self.packageList.deleteAllItems()
         self.packageList.addItems(itemCollection)
         self.packageList.doneMultipleChanges()
+
+        if createTreeItem:
+            self.tree.startMultipleChanges()
+            icon = self.gIcons.icon("Search")
+            treeItem = yui.YTreeItem(self.gIcons.groups['Search']['title'] , icon, False)
+            treeItem.setSelected(True)
+            self.groupList[self.gIcons.groups['Search']['title']] = { "item" : treeItem, "name" : _("Search") }
+            self.tree.addItem(treeItem)
+            self.tree.doneMultipleChanges()
+            self.tree.rebuildTree()
 
         yui.YUI.app().normalCursor()
 
@@ -920,87 +902,44 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                     s+= missing
             self.info.setValue(s)
 
-    def _searchPackages(self, filter='all', createTreeItem=False) :
+    def _searchPackagesPkg(self, search_string, filter='all'):
+        fields = []
+        type_item = self.search_list.selectedItem()
+        for field in self.local_search_types.keys():
+            if self.local_search_types[field]['item'] == type_item:
+                fields.append(field)
+                break
+
+        strings = re.split('[ ,|:;]',search_string)
+
+        ### TODO manage tags
+        tags =""
+
+        packages = self.backend.search(fields, strings, self.match_all, self.newest_only, tags )
+
+        pkgs = []
+        for pkg in packages:
+            if (filter == 'all' or (filter == 'to_update' and pkg.is_update ) or (filter == 'installed' and pkg.installed) or
+                (filter == 'not_installed' and not pkg.installed) or
+                (filter == 'skip_other' and (pkg.arch == 'noarch' or pkg.arch == platform.machine()))):
+                pkgs.append(pkg)
+        return pkgs
+
+    def _queueSearch(self, filter='all', createTreeItem=False):
         '''
         retrieves the info from search input field and from the search type list
-        to perform a paclage research and to fill the package list widget
+        to perform a package research and to fill the package list widget
 
         return False if an empty string used
         '''
         sel_pkg = self._selectedPackage()
 
-        #clean up tree
-        if createTreeItem:
-            self._fillGroupTree()
-
         search_string = self.find_entry.value()
-        if search_string :
-            fields = []
-            type_item = self.search_list.selectedItem()
-            for field in self.local_search_types.keys():
-                if self.local_search_types[field]['item'] == type_item:
-                    fields.append(field)
-                    break
-
-            yui.YUI.app().busyCursor()
-            strings = re.split('[ ,|:;]',search_string)
-            ### TODO manage tags
-            tags =""
-            packages = self.backend.search(fields, strings, self.match_all, self.newest_only, tags )
-
-            self.itemList = {}
-            # {
-            #   name-epoch_version-release.arch : { pkg: dnf-pkg, item: YItem}
-            # }
-
-            # Package API doc: http://dnf.readthedocs.org/en/latest/api_package.html
-            for pkg in packages:
-                if (filter == 'all' or (filter == 'to_update' and pkg.is_update ) or (filter == 'installed' and pkg.installed) or
-                    (filter == 'not_installed' and not pkg.installed) or
-                    (filter == 'skip_other' and (pkg.arch == 'noarch' or pkg.arch == platform.machine()))) :
-                    item = yui.YCBTableItem(pkg.name , pkg.summary , pkg.version, pkg.release, pkg.arch, pkg.sizeM)
-                    pkg_name = pkg.fullname
-                    if sel_pkg :
-                        if sel_pkg.fullname == pkg_name :
-                            item.setSelected(True)
-                    item.check(self.packageQueue.checked(pkg))
-                    self.itemList[pkg_name] = {
-                        'pkg' : pkg, 'item' : item
-                        }
-                    if not self.update_only:
-                        item.addCell(" ")
-                        self._setStatusToItem(pkg,item)
-                    item.this.own(False)
-
-            keylist = sorted(self.itemList.keys())
-            v = []
-            for key in keylist :
-                item = self.itemList[key]['item']
-                v.append(item)
-
-            itemCollection = yui.YItemCollection(v)
-
-            self.packageList.startMultipleChanges()
-            # cleanup old changed items since we are removing all of them
-            self.packageList.setChangedItem(None)
-            self.packageList.deleteAllItems()
-            self.packageList.addItems(itemCollection)
-            self.packageList.doneMultipleChanges()
-
-            if createTreeItem:
-                self.tree.startMultipleChanges()
-                icon = self.gIcons.icon("Search")
-                treeItem = yui.YTreeItem(self.gIcons.groups['Search']['title'] , icon, False)
-                treeItem.setSelected(True)
-                self.groupList[self.gIcons.groups['Search']['title']] = { "item" : treeItem, "name" : _("Search") }
-                self.tree.addItem(treeItem)
-                self.tree.doneMultipleChanges()
-                self.tree.rebuildTree()
-            yui.YUI.app().normalCursor()
-        else :
+        if search_string:
+            self.backendQueueEvent('get search pkgs', filter, search_string, createTreeItem)
+            return True
+        else:
             return False
-
-        return True
 
     def _populate_transaction(self) :
         '''
@@ -1056,16 +995,16 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                                 # to install the key :(
                                 break
                         else:  # error in signature verification
-                            dialogs.infoMsgBox({'title' : _('Error checking package signatures'),
+                            self.uiQueueEvent('infoMsgBox', {'title' : _('Error checking package signatures'),
                                                 'text' : '<br>'.join(result), 'richtext' : True })
                             break
                     if rc == 4:  # Download errors
-                        dialogs.infoMsgBox({'title'  : ngettext('Downloading error',
+                        self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Downloading error',
                             'Downloading errors', len(result)), 'text' : '<br>'.join(result), 'richtext' : True })
                         logger.error('Download error')
                         logger.error(result)
                     elif rc != 0:  # other transaction errors
-                        dialogs.infoMsgBox({'title'  : ngettext('Error in transaction',
+                        self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Error in transaction',
                                     'Errors in transaction', len(result)), 'text' :  '<br>'.join(result), 'richtext' : True })
                         logger.error('RunTransaction failure')
                         logger.error(result)
@@ -1077,10 +1016,10 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 logger.error('BuildTransaction failure')
                 logger.error(result)
                 s = "%s"%result
-                dialogs.warningMsgBox({'title' : _("BuildTransaction failure"), "text": s, "richtext":True})
+                self.uiQueueEvent('warningMsgBox', {'title' : _("BuildTransaction failure"), "text": s, "richtext":True})
         except dnfdaemon.client.AccessDeniedError as e:
             logger.error("dnfdaemon client AccessDeniedError: %s ", e)
-            dialogs.warningMsgBox({'title' : _("BuildTransaction failure"), "text": _("dnfdaemon client not authorized:%(NL)s%(error)s")%{'NL': "\n",'error' : str(e)}})
+            self.uiQueueEvent('warningMsgBox', {'title' : _("BuildTransaction failure"), "text": _("dnfdaemon client not authorized:%(NL)s%(error)s")%{'NL': "\n",'error' : str(e)}})
         except:
             exc, msg = misc.parse_dbus_error()
             if 'AccessDeniedError' in exc:
@@ -1129,196 +1068,93 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
         hw = None
         return undo
 
-    def handleevent(self):
-        """
-        Event-handler for the maindialog
-        """
-        self.running = True
+    def backendQueueEvent(self, event, *args, **kw):
+        self._backendEventQueue.put((event, args, kw))
+
+    def uiQueueEvent(self, event, *args, **kw):
+        self._uiEventQueue.put((event, args, kw))
+        # Force yield control to other thread so that ui stuff can update as soon as possible
+        # usually it's the backend thread that call this.
+        time.sleep(0.0001)
+
+    def handlestartup(self):
+        self.uiQueueEvent('input lock')
+        self.infobar.set_progress(0.0)
+        self.infobar.info(_('Starting dnfdragora'))
+
+        self.backendQueueEvent('get groups')
+
+    def uieventloop(self):
+        self._uiEventQueue = queue.Queue()
+        self._setupUI()
+        self.ui_is_ready.set()
+        self.handlestartup()
+
+        ui_event_lock = threading.Semaphore(1)
+
+        def uiEventWorker():
+            while self.running:
+                self.uiQueueEvent('ui_event')
+                time.sleep(1/30)
+                # stop adding ui_event when the ui thread stalled
+                ui_event_lock.acquire()
+        threading.Thread(target=uiEventWorker, daemon=True).start()
+
         while self.running == True:
-            event = self.dialog.waitForEvent()
+            event, args, kw = self._uiEventQueue.get()
+            if event == 'ui_event':
+                ui_event_lock.release()
+                ui_event = self.dialog.pollEvent()
+                if ui_event:
+                    self.uihandleevent(ui_event)
+            elif event == 'input lock':
+                self.find_button.setDisabled()
+                self.find_entry.setDisabled()
+            elif event == 'input unlock':
+                self.find_button.setEnabled()
+                self.find_entry.setEnabled()
+            elif event == 'function':
+                function, *args = args
+                function(*args, **kw)
+            elif event == 'set groups':
+                rpm_groups = args[0]
+                self.gIcons = compsicons.CompsIcons(rpm_groups, self.group_icon_path) if self.use_comps else  groupicons.GroupIcons(self.group_icon_path)
 
-            eventType = event.eventType()
-
-            rebuild_package_list = False
-            group = None
-            #event type checking
-            if (eventType == yui.YEvent.CancelEvent) :
-                self.running = False
-                break
-            elif (eventType == yui.YEvent.MenuEvent) :
-                ### MENU ###
-                item = event.item()
-                if (item) :
-                    if  item == self.fileMenu['reset_sel'] :
-                        self.packageQueue.clear()
-                        sel = self.tree.selectedItem()
-                        if sel :
-                            group = self._groupNameFromItem(self.groupList, sel)
-                            if (group == "Search"):
-                                filter = self._filterNameSelected()
-                                if not self._searchPackages(filter) :
-                                    rebuild_package_list = True
-                            else:
-                                rebuild_package_list = True
-                    elif item == self.fileMenu['reload'] :
-                        self.reset_cache()
-                    elif item == self.fileMenu['repos']:
-                        rd = dialogs.RepoDialog(self)
-                        refresh_data=rd.run()
-                        rd = None
-                        if refresh_data:
-                          self.release_root_backend()
-                          self.backend.reload()
-                          self._fillGroupTree()
-                          rebuild_package_list = True
-                    elif item == self.fileMenu['quit'] :
-                        #### QUIT
-                        self.running = False
-                        break
-                    elif item == self.optionsMenu['user_prefs'] :
-                        up = dialogs.UserPrefsDialog(self)
-                        up.run()
-                    elif item == self.infoMenu['history'] :
-                        performedUNDO = self._load_history()
-                        if performedUNDO:
-                            sel = self.tree.selectedItem()
-                            if sel :
-                                group = self._groupNameFromItem(self.groupList, sel)
-                                filter = self._filterNameSelected()
-                                if (group == "Search"):
-                                    # force tree rebuilding to show new pacakge status
-                                    if not self._searchPackages(filter, True) :
-                                        rebuild_package_list = True
-                                else:
-                                    if filter == "to_update":
-                                        self._fillGroupTree()
-                                    rebuild_package_list = True
-
-                    elif item == self.helpMenu['help']  :
-                        dialogs.warningMsgBox({'title' : _("Sorry"), "text": _("Not implemented yet")})
-                    elif item == self.helpMenu['about']  :
-                        self.AboutDialog.run()
-                else:
-                    url = yui.toYMenuEvent(event).id()
-                    if url :
-                        if url in self.infoshown.keys():
-                            self.infoshown[url]["show"] = not self.infoshown[url]["show"]
-                            sel_pkg = self._selectedPackage()
-                            self._setInfoOnWidget(sel_pkg)
-                        else :
-                            logger.debug("run browser, URL: %s"%url)
-                            webbrowser.open(url, 2)
-            elif (eventType == yui.YEvent.WidgetEvent) :
-                # widget selected
-                widget  = event.widget()
-                if (widget == self.quitButton) :
-                    #### QUIT
-                    self.running = False
-                    break
-                elif (widget == self.packageList) :
-                    wEvent = yui.toYWidgetEvent(event)
-                    if (wEvent.reason() == yui.YEvent.ValueChanged) :
-                        changedItem = self.packageList.changedItem()
-                        if changedItem :
-                            for it in self.itemList:
-                                if (self.itemList[it]['item'] == changedItem) :
-                                    pkg = self.itemList[it]['pkg']
-                                    if pkg.installed and self.backend.protected(pkg) :
-                                        dialogs.warningMsgBox({'title' : _("Protected package selected"), "text": _("Package %s cannot be removed")%pkg.name, "richtext":True})
-                                        sel = self.tree.selectedItem()
-                                        if sel :
-                                            group = self._groupNameFromItem(self.groupList, sel)
-                                            if (group == "Search"):
-                                                filter = self._filterNameSelected()
-                                                if not self._searchPackages(filter) :
-                                                    rebuild_package_list = True
-                                            else:
-                                                rebuild_package_list = True
-                                    else :
-                                        if changedItem.checked():
-                                            self.packageQueue.add(pkg, 'i')
-                                        else:
-                                            self.packageQueue.add(pkg, 'r')
-                                        self._setStatusToItem(pkg, self.itemList[it]['item'], True)
-                                    break
-
-                elif (widget == self.reset_search_button) :
-                    #### RESET
-                    rebuild_package_list = True
-                    self.find_entry.setValue("")
-                    self._fillGroupTree()
-
-                elif (widget == self.find_button) :
-                    #### FIND
-                    filter = self._filterNameSelected()
-                    if not self._searchPackages(filter, True) :
-                        rebuild_package_list = True
-
-                elif (widget == self.checkAllButton) :
-                    for it in self.itemList:
-                        pkg = self.itemList[it]['pkg']
-                        self.packageQueue.add(pkg, 'i')
-                        rebuild_package_list = True
-
-                elif (widget == self.applyButton) :
-                    #### APPLY
-                    self._populate_transaction()
-                    self._run_transaction(self.always_yes)
-                    sel = self.tree.selectedItem()
-                    if sel :
-                        group = self._groupNameFromItem(self.groupList, sel)
-                        filter = self._filterNameSelected()
-                        if (group == "Search"):
-                            # force tree rebuilding to show new pacakge status
-                            if not self._searchPackages(filter, True) :
-                                rebuild_package_list = True
-                        else:
-                            if filter == "to_update":
-                                self._fillGroupTree()
-                            rebuild_package_list = True
-                elif (widget == self.view_box) :
-                    view = self._viewNameSelected()
-                    filter = self._filterNameSelected()
-                    self.checkAllButton.setEnabled(filter == 'to_update')
-                    rebuild_package_list = True
-                    #reset find entry, it does not make sense here
-                    self.find_entry.setValue("")
-                    self._fillGroupTree()
-                elif (widget == self.tree) or (widget == self.filter_box) :
-                    if (widget == self.filter_box) :
-                        view = self._viewNameSelected()
-                        filter = self._filterNameSelected()
-                        self._fillGroupTree()
-                        self.checkAllButton.setEnabled(filter == 'to_update')
-                    sel = self.tree.selectedItem()
-                    if sel :
-                        group = self._groupNameFromItem(self.groupList, sel)
-                        if (group == "Search"):
-                            filter = self._filterNameSelected()
-                            if not self._searchPackages(filter) :
-                                rebuild_package_list = True
-                        else:
-                            rebuild_package_list = True
-                else:
-                    print(_("Unmanaged widget"))
-            else:
-                print(_("Unmanaged event"))
-
-            if rebuild_package_list :
+                self._fillGroupTree()
                 sel = self.tree.selectedItem()
+                group = None
                 if sel :
                     group = self._groupNameFromItem(self.groupList, sel)
-                    filter = self._filterNameSelected()
-                    self._fillPackageList(group, filter)
 
-            sel_pkg = self._selectedPackage()
-            if sel_pkg :
-                self._setInfoOnWidget(sel_pkg)
+                filter = self._filterNameSelected()
+                self.checkAllButton.setEnabled(filter == 'to_update')
+                self.backendQueueEvent('get fill pkgs', group, filter)
+            elif event == 'fill groups':
+                if len(args) == 1:
+                    pkgs, createTreeItem = args[0], False
+                elif len(args) == 2:
+                    pkgs, createTreeItem = args
 
-            if self.packageQueue.total() > 0 and not self.applyButton.isEnabled():
-                self.applyButton.setEnabled()
-            elif self.packageQueue.total() == 0 and self.applyButton.isEnabled():
-                self.applyButton.setEnabled(False)
+                self._fillPackageList(pkgs, createTreeItem)
+                sel_pkg = self._selectedPackage()
+                if sel_pkg :
+                    self._setInfoOnWidget(sel_pkg)
+                self.infobar.reset_all()
+            elif event == 'error':
+                error = args[0]
+                raise error
+            elif event == 'quit':
+                break
+            elif event == 'infoMsgBox':
+                msg = args[0]
+                dialogs.infoMsgBox(msg)
+            elif event == 'warningMsgBox':
+                msg = args[0]
+                dialogs.warningMsgBox(msg)
+            else:
+                print("Unknown event:", event)
+
+        self.backendQueueEvent('quit')
 
         # Save user prefs on exit
         self.saveUserPreference()
@@ -1331,6 +1167,229 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
         self.loop_has_finished = True
         #self.backend.quit()
         #self.backend.release_root_backend()
+
+    def backendeventloop(self):
+        """
+        Event-loop for the maindialog
+        """
+        self._backendEventQueue = queue.Queue()
+        self.running = True
+        self.backend_is_ready.set()
+        self.ui_is_ready.wait()
+
+        while self.running == True:
+            event, args, kw = self._backendEventQueue.get()
+            if event == 'install option':
+                pkgs = " ".join(self.options['install'])
+                self.backend.Install(pkgs)
+                #TODO evaluate if passing always_yes to False in this case
+                always_yes = self.always_yes
+                self._run_transaction(always_yes)
+            elif event == 'get groups':
+                try:
+                    self.uiQueueEvent('set groups', self.backend.GetGroups())
+                except Exception as e:
+                    self.uiQueueEvent('error', e)
+                    break
+                    #raise e
+            elif event == 'get fill pkgs':
+                group, filter = args
+                self.uiQueueEvent('fill groups', self._getFillPackageListPkg(group, filter))
+            elif event == 'get search pkgs':
+                filter, search_string, createTreeItem = args
+                self.infobar.set_progress(0.0)
+                self.infobar.info(_('Searching %(search_string)s')%{'search_string': search_string})
+                self.uiQueueEvent('input lock')
+                self.uiQueueEvent('fill groups', self._searchPackagesPkg(search_string, filter), createTreeItem)
+            elif event == 'quit':
+                break
+            else:
+                print("Unknown event:", event)
+
+        self.uiQueueEvent('quit')
+
+    def uihandleevent(self, event):
+        eventType = event.eventType()
+
+        rebuild_package_list = False
+        group = None
+        #event type checking
+        if (eventType == yui.YEvent.CancelEvent) :
+            self.running = False
+            return
+        elif (eventType == yui.YEvent.MenuEvent) :
+            ### MENU ###
+            item = event.item()
+            if (item) :
+                if item == self.fileMenu['reset_sel'] :
+                    self.packageQueue.clear()
+                    sel = self.tree.selectedItem()
+                    if sel :
+                        group = self._groupNameFromItem(self.groupList, sel)
+                        if (group == "Search"):
+                            filter = self._filterNameSelected()
+                            if not self._queueSearch(filter) :
+                                rebuild_package_list = True
+                        else:
+                            rebuild_package_list = True
+                elif item == self.fileMenu['reload'] :
+                    self.reset_cache()
+                elif item == self.fileMenu['repos']:
+                    rd = dialogs.RepoDialog(self)
+                    refresh_data=rd.run()
+                    rd = None
+                    if refresh_data:
+                      self.release_root_backend()
+                      self.backend.reload()
+                      self._fillGroupTree()
+                      rebuild_package_list = True
+                elif item == self.fileMenu['quit'] :
+                    #### QUIT
+                    self.running = False
+                    return
+                elif item == self.optionsMenu['user_prefs'] :
+                    up = dialogs.UserPrefsDialog(self)
+                    up.run()
+                elif item == self.infoMenu['history'] :
+                    performedUNDO = self._load_history()
+                    if performedUNDO:
+                        sel = self.tree.selectedItem()
+                        if sel :
+                            group = self._groupNameFromItem(self.groupList, sel)
+                            filter = self._filterNameSelected()
+                            if (group == "Search"):
+                                # force tree rebuilding to show new pacakge status
+                                if not self._queueSearch(filter, True) :
+                                    rebuild_package_list = True
+                            else:
+                                if filter == "to_update":
+                                    self._fillGroupTree()
+                                rebuild_package_list = True
+
+                elif item == self.helpMenu['help']  :
+                    self.uiQueueEvent('warningMsgBox', {'title' : _("Sorry"), "text": _("Not implemented yet")})
+                elif item == self.helpMenu['about']  :
+                    self.AboutDialog.run()
+            else:
+                url = yui.toYMenuEvent(event).id()
+                if url :
+                    if url in self.infoshown.keys():
+                        self.infoshown[url]["show"] = not self.infoshown[url]["show"]
+                        sel_pkg = self._selectedPackage()
+                        self._setInfoOnWidget(sel_pkg)
+                    else :
+                        logger.debug("run browser, URL: %s"%url)
+                        webbrowser.open(url, 2)
+        elif (eventType == yui.YEvent.WidgetEvent) :
+            # widget selected
+            widget  = event.widget()
+            if (widget == self.quitButton) :
+                #### QUIT
+                self.running = False
+                return
+            elif (widget == self.packageList) :
+                wEvent = yui.toYWidgetEvent(event)
+                if (wEvent.reason() == yui.YEvent.ValueChanged) :
+                    changedItem = self.packageList.changedItem()
+                    if changedItem :
+                        for it in self.itemList:
+                            if (self.itemList[it]['item'] == changedItem) :
+                                pkg = self.itemList[it]['pkg']
+                                if pkg.installed and self.backend.protected(pkg) :
+                                    self.uiQueueEvent('warningMsgBox', {'title' : _("Protected package selected"), "text": _("Package %s cannot be removed")%pkg.name, "richtext":True})
+                                    sel = self.tree.selectedItem()
+                                    if sel :
+                                        group = self._groupNameFromItem(self.groupList, sel)
+                                        if (group == "Search"):
+                                            filter = self._filterNameSelected()
+                                            if not self._queueSearch(filter) :
+                                                rebuild_package_list = True
+                                        else:
+                                            rebuild_package_list = True
+                                else :
+                                    if changedItem.checked():
+                                        self.packageQueue.add(pkg, 'i')
+                                    else:
+                                        self.packageQueue.add(pkg, 'r')
+                                    self._setStatusToItem(pkg, self.itemList[it]['item'], True)
+
+            elif (widget == self.reset_search_button) :
+                #### RESET
+                rebuild_package_list = True
+                self.find_entry.setValue("")
+                self._fillGroupTree()
+
+            elif (widget == self.find_button) :
+                #### FIND
+                filter = self._filterNameSelected()
+                if not self._queueSearch(filter, True) :
+                    rebuild_package_list = True
+
+            elif (widget == self.checkAllButton) :
+                for it in self.itemList:
+                    pkg = self.itemList[it]['pkg']
+                    self.packageQueue.add(pkg, 'i')
+                    rebuild_package_list = True
+
+            elif (widget == self.applyButton) :
+                #### APPLY
+                self._populate_transaction()
+                self._run_transaction(self.always_yes)
+                sel = self.tree.selectedItem()
+                if sel :
+                    group = self._groupNameFromItem(self.groupList, sel)
+                    filter = self._filterNameSelected()
+                    if (group == "Search"):
+                        # force tree rebuilding to show new pacakge status
+                        if not self._queueSearch(filter, True) :
+                            rebuild_package_list = True
+                    else:
+                        if filter == "to_update":
+                            self._fillGroupTree()
+                        rebuild_package_list = True
+            elif (widget == self.view_box) :
+                view = self._viewNameSelected()
+                filter = self._filterNameSelected()
+                self.checkAllButton.setEnabled(filter == 'to_update')
+                rebuild_package_list = True
+                #reset find entry, it does not make sense here
+                self.find_entry.setValue("")
+                self._fillGroupTree()
+            elif (widget == self.tree) or (widget == self.filter_box) :
+                if (widget == self.filter_box) :
+                    view = self._viewNameSelected()
+                    filter = self._filterNameSelected()
+                    self._fillGroupTree()
+                    self.checkAllButton.setEnabled(filter == 'to_update')
+                sel = self.tree.selectedItem()
+                if sel :
+                    group = self._groupNameFromItem(self.groupList, sel)
+                    if (group == "Search"):
+                        filter = self._filterNameSelected()
+                        if not self._queueSearch(filter) :
+                            rebuild_package_list = True
+                    else:
+                        rebuild_package_list = True
+            else:
+                print(_("Unmanaged widget"))
+        else:
+            print(_("Unmanaged event"))
+
+        if rebuild_package_list :
+            sel = self.tree.selectedItem()
+            if sel :
+                group = self._groupNameFromItem(self.groupList, sel)
+                filter = self._filterNameSelected()
+                self.backendQueueEvent('get fill pkgs', group, filter)
+
+        sel_pkg = self._selectedPackage()
+        if sel_pkg :
+            self._setInfoOnWidget(sel_pkg)
+
+        if self.packageQueue.total() > 0 and not self.applyButton.isEnabled():
+            self.applyButton.setEnabled()
+        elif self.packageQueue.total() == 0 and self.applyButton.isEnabled():
+            self.applyButton.setEnabled(False)
 
     def quit(self):
         self.running = False
