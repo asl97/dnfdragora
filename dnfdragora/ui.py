@@ -97,7 +97,7 @@ class PackageQueue:
 
     def checked(self, pkg):
         '''
-        returns if a package has to be checked in gui pacakge-list
+        returns if a package has to be checked in gui package-list
         '''
         pkg_id = pkg.pkg_id
         if pkg_id in self.actions.keys():
@@ -106,7 +106,7 @@ class PackageQueue:
 
     def action(self, pkg):
         '''
-        returns the action of the queued package or None if pacakge is not queued
+        returns the action of the queued package or None if package is not queued
         '''
         pkg_id = pkg.pkg_id
         if pkg_id in self.actions.keys():
@@ -1258,7 +1258,7 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                             group = self._groupNameFromItem(self.groupList, sel)
                             filter = self._filterNameSelected()
                             if (group == "Search"):
-                                # force tree rebuilding to show new pacakge status
+                                # force tree rebuilding to show new package status
                                 if not self._queueSearch(filter, True) :
                                     rebuild_package_list = True
                             else:
@@ -1340,7 +1340,7 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                     group = self._groupNameFromItem(self.groupList, sel)
                     filter = self._filterNameSelected()
                     if (group == "Search"):
-                        # force tree rebuilding to show new pacakge status
+                        # force tree rebuilding to show new package status
                         if not self._queueSearch(filter, True) :
                             rebuild_package_list = True
                     else:
