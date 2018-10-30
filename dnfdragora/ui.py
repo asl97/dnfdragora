@@ -955,6 +955,51 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 if not rc:
                     logger.error('AddTransaction result : %s: %s' % (rc, pkg_id))
 
+    def _exec_transaction(self):
+        self.infobar.info(_('Applying changes to the system'))
+        rc, result = self.backend.RunTransaction()
+        # This can happen more than once (more gpg keys to be
+        # imported)
+        while rc == 1:
+            logger.debug('GPG key missing: %s' % repr(result))
+            # get info about gpgkey to be comfirmed
+            values = self.backend._gpg_confirm
+            if values:  # There is a gpgkey to be verified
+                (pkg_id, userid, hexkeyid, keyurl, timestamp) = values
+                logger.debug('GPGKey : %s' % repr(values))
+                resp = dialogs.ask_for_gpg_import(values)
+                self.backend.ConfirmGPGImport(hexkeyid, resp)
+                # tell the backend that the gpg key is confirmed
+                # rerun the transaction
+                # FIXME: It should not be needed to populate
+                # the transaction again
+                if resp:
+                    self._populate_transaction()
+                    rc, result = self.backend.BuildTransaction()
+                    rc, result = self.backend.RunTransaction()
+                else:
+                    # NOTE TODO answer no is the only way to exit, since it seems not
+                    # to install the key :(
+                    break
+            else:  # error in signature verification
+                self.uiQueueEvent('infoMsgBox', {'title' : _('Error checking package signatures'),
+                                    'text' : '<br>'.join(result), 'richtext' : True })
+                break
+        if rc == 4:  # Download errors
+            self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Downloading error',
+                'Downloading errors', len(result)), 'text' : '<br>'.join(result), 'richtext' : True })
+            logger.error('Download error')
+            logger.error(result)
+        elif rc != 0:  # other transaction errors
+            self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Error in transaction',
+                        'Errors in transaction', len(result)), 'text' :  '<br>'.join(result), 'richtext' : True })
+            logger.error('RunTransaction failure')
+            logger.error(result)
+
+        self.release_root_backend()
+        self.packageQueue.clear()
+        self.backend.reload()
+
     def _run_transaction(self, always_yes):
         '''
         Run a transaction after an apply button or a package given by CLI
@@ -969,49 +1014,12 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                     ok = transaction_result_dlg.run(result)
 
                 if ok:  # Ok pressed
-                    self.infobar.info(_('Applying changes to the system'))
-                    rc, result = self.backend.RunTransaction()
-                    # This can happen more than once (more gpg keys to be
-                    # imported)
-                    while rc == 1:
-                        logger.debug('GPG key missing: %s' % repr(result))
-                        # get info about gpgkey to be comfirmed
-                        values = self.backend._gpg_confirm
-                        if values:  # There is a gpgkey to be verified
-                            (pkg_id, userid, hexkeyid, keyurl, timestamp) = values
-                            logger.debug('GPGKey : %s' % repr(values))
-                            resp = dialogs.ask_for_gpg_import(values)
-                            self.backend.ConfirmGPGImport(hexkeyid, resp)
-                            # tell the backend that the gpg key is confirmed
-                            # rerun the transaction
-                            # FIXME: It should not be needed to populate
-                            # the transaction again
-                            if resp:
-                                self._populate_transaction()
-                                rc, result = self.backend.BuildTransaction()
-                                rc, result = self.backend.RunTransaction()
-                            else:
-                                # NOTE TODO answer no is the only way to exit, since it seems not
-                                # to install the key :(
-                                break
-                        else:  # error in signature verification
-                            self.uiQueueEvent('infoMsgBox', {'title' : _('Error checking package signatures'),
-                                                'text' : '<br>'.join(result), 'richtext' : True })
-                            break
-                    if rc == 4:  # Download errors
-                        self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Downloading error',
-                            'Downloading errors', len(result)), 'text' : '<br>'.join(result), 'richtext' : True })
-                        logger.error('Download error')
-                        logger.error(result)
-                    elif rc != 0:  # other transaction errors
-                        self.uiQueueEvent('infoMsgBox', {'title'  : ngettext('Error in transaction',
-                                    'Errors in transaction', len(result)), 'text' :  '<br>'.join(result), 'richtext' : True })
-                        logger.error('RunTransaction failure')
-                        logger.error(result)
+                    # TODO: figure out why it lockup if we try to execute the transaction
+                    #       in the backend thread
+                    #self.backendQueueEvent('execute transaction')
+                    self._exec_transaction()
+                    self.uiQueueEvent('apply done')
 
-                    self.release_root_backend()
-                    self.packageQueue.clear()
-                    self.backend.reload()
             else:
                 logger.error('BuildTransaction failure')
                 logger.error(result)
@@ -1107,6 +1115,19 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 ui_event = self.dialog.pollEvent()
                 if ui_event:
                     self.uihandleevent(ui_event)
+            elif event == 'apply done':
+                sel = self.tree.selectedItem()
+                if sel :
+                    group = self._groupNameFromItem(self.groupList, sel)
+                    filter = self._filterNameSelected()
+                    if (group == "Search"):
+                        # force tree rebuilding to show new package status
+                        if not self._queueSearch(filter, True) :
+                            self.backendQueueEvent('get fill pkgs', group, filter)
+                    else:
+                        if filter == "to_update":
+                            self._fillGroupTree()
+                        self.backendQueueEvent('get fill pkgs', group, filter)
             elif event == 'input lock':
                 self.find_button.setDisabled()
                 self.find_entry.setDisabled()
@@ -1185,6 +1206,9 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 #TODO evaluate if passing always_yes to False in this case
                 always_yes = self.always_yes
                 self._run_transaction(always_yes)
+            elif event == 'execute transaction':
+                self._exec_transaction()
+                self.uiQueueEvent('apply done')
             elif event == 'get groups':
                 try:
                     self.uiQueueEvent('set groups', self.backend.GetGroups())
@@ -1335,18 +1359,6 @@ class mainGui(dnfdragora.basedragora.BaseDragora):
                 #### APPLY
                 self._populate_transaction()
                 self._run_transaction(self.always_yes)
-                sel = self.tree.selectedItem()
-                if sel :
-                    group = self._groupNameFromItem(self.groupList, sel)
-                    filter = self._filterNameSelected()
-                    if (group == "Search"):
-                        # force tree rebuilding to show new package status
-                        if not self._queueSearch(filter, True) :
-                            rebuild_package_list = True
-                    else:
-                        if filter == "to_update":
-                            self._fillGroupTree()
-                        rebuild_package_list = True
             elif (widget == self.view_box) :
                 view = self._viewNameSelected()
                 filter = self._filterNameSelected()
